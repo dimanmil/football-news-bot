@@ -16,38 +16,49 @@ CHAT_ID = os.environ["CHAT_ID"]
 
 STATE_FILE = "seen.json"
 
+
+# translate=False — российские источники.
+# translate=True — зарубежные источники.
 FEEDS = [
     {
         "name": "Чемпионат",
         "url": "https://www.championat.com/rss/news/football/",
+        "translate": False,
     },
     {
         "name": "Спорт-Экспресс",
         "url": "https://www.sport-express.ru/services/materials/news/football/se/",
+        "translate": False,
     },
     {
         "name": "Sports.ru",
         "url": "https://www.sports.ru/rss/rubric.xml?s=208",
+        "translate": False,
     },
     {
         "name": "Gazzetta",
         "url": "https://www.gazzetta.it/dynamic-feed/rss/section/Calcio.xml",
+        "translate": True,
     },
     {
         "name": "AS",
         "url": "https://feeds.as.com/mrss-s/pages/as/site/as.com/section/futbol/portada/",
+        "translate": True,
     },
     {
         "name": "Mundo Deportivo",
         "url": "https://www.mundodeportivo.com/feed/rss/futbol",
+        "translate": True,
     },
     {
         "name": "kicker",
         "url": "https://newsfeed.kicker.de/news/fussball",
+        "translate": True,
     },
     {
         "name": "RMC Sport",
         "url": "https://rmcsport.bfmtv.com/rss/football/",
+        "translate": True,
     },
 ]
 
@@ -130,7 +141,7 @@ def load_state():
 
 def save_state(seen):
     data = {
-        "urls": list(seen)[-20000:]
+        "urls": sorted(seen)[-20000:]
     }
 
     with open(STATE_FILE, "w", encoding="utf-8") as file:
@@ -171,8 +182,7 @@ def read_feed(feed):
 
         url = clean_url(link)
 
-        # Разные издания могут публиковать одну новость.
-        # Каждая публикация учитывается отдельно.
+        # Один источник + одна ссылка = одна публикация.
         unique_id = feed["name"] + "|" + url
 
         entries.append({
@@ -181,20 +191,69 @@ def read_feed(feed):
             "date": published,
             "sort_date": published or datetime.now(timezone.utc),
             "source": feed["name"],
-            "id": unique_id
+            "id": unique_id,
+            "translate": feed.get("translate", False)
         })
 
     return entries
 
 
-def send_message(item):
+def translate_title(title):
+    api_url = "https://translate.googleapis.com/translate_a/single"
+
+    params = urllib.parse.urlencode({
+        "client": "gtx",
+        "sl": "auto",
+        "tl": "ru",
+        "dt": "t",
+        "q": title
+    })
+
+    request = urllib.request.Request(
+        f"{api_url}?{params}",
+        headers={
+            "User-Agent": "Mozilla/5.0"
+        }
+    )
+
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(
+                request,
+                timeout=15
+            ) as response:
+                result = json.loads(
+                    response.read().decode("utf-8")
+                )
+
+            translated = "".join(
+                part[0]
+                for part in result[0]
+                if part and part[0]
+            ).strip()
+
+            if translated:
+                return translated
+
+            print(f"Пустой перевод: {title}")
+
+        except Exception as error:
+            print(f"Ошибка перевода: {error}")
+
+            if attempt == 0:
+                time.sleep(3)
+
+    return None
+
+
+def send_message(item, title):
     if item["date"]:
         date_text = item["date"].strftime("%H:%M UTC")
     else:
         date_text = "время публикации не указано"
 
     message = (
-        f"{item['title']}\n\n"
+        f"{title}\n\n"
         f"Источник: {item['source']}\n"
         f"Время: {date_text}\n"
         f"{item['url']}"
@@ -211,7 +270,9 @@ def send_message(item):
     request = urllib.request.Request(url, data=data)
 
     with urllib.request.urlopen(request, timeout=30) as response:
-        result = json.loads(response.read().decode("utf-8"))
+        result = json.loads(
+            response.read().decode("utf-8")
+        )
 
     if not result.get("ok"):
         raise RuntimeError("Telegram не подтвердил отправку")
@@ -219,7 +280,6 @@ def send_message(item):
 
 def main():
     seen = load_state()
-
     candidates = []
 
     for feed in FEEDS:
@@ -235,8 +295,7 @@ def main():
                 if item["id"] in seen:
                     continue
 
-                # Совместимость со старым seen.json:
-                # ранее ссылки сохранялись без названия источника.
+                # Совместимость со старым seen.json.
                 if item["url"] in seen:
                     continue
 
@@ -245,8 +304,7 @@ def main():
         except Exception as error:
             print(f"Ошибка {feed['name']}: {error}")
 
-    # Сначала отправляем самые старые из ещё не отправленных,
-    # чтобы при задержке не нарушать хронологию.
+    # Отправляем публикации в хронологическом порядке.
     candidates.sort(
         key=lambda item: item["sort_date"]
     )
@@ -255,17 +313,31 @@ def main():
 
     for item in candidates:
         try:
-            send_message(item)
+            title = item["title"]
 
+            # Переводим только зарубежные источники.
+            if item["translate"]:
+                translated = translate_title(title)
+
+                if not translated:
+                    print(
+                        f"Не удалось перевести, "
+                        f"повторим позже: {title}"
+                    )
+                    continue
+
+                title = translated
+
+            send_message(item, title)
+
+            # Отмечаем публикацию только после отправки.
             seen.add(item["id"])
             sent += 1
 
             print(
-                f"Отправлено [{item['source']}]: "
-                f"{item['title']}"
+                f"Отправлено [{item['source']}]: {title}"
             )
 
-            # Небольшая пауза между сообщениями.
             time.sleep(1)
 
         except Exception as error:
