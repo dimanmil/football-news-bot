@@ -1,13 +1,12 @@
 
 import os
-import re
 import json
 import time
 import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 
 
@@ -16,9 +15,10 @@ CHAT_ID = os.environ["CHAT_ID"]
 
 STATE_FILE = "seen.json"
 
+# Отправляем только публикации за последние 90 минут.
+MAX_AGE_MINUTES = 90
 
-# translate=False — российские источники.
-# translate=True — зарубежные источники.
+# Список RSS-источников.
 FEEDS = [
     {
         "name": "Чемпионат",
@@ -164,7 +164,6 @@ def read_feed(feed):
             continue
 
         title = get_child_text(element, {"title"})
-
         link = get_child_text(element, {"link"})
 
         if not link:
@@ -180,16 +179,18 @@ def read_feed(feed):
         if not title or not link:
             continue
 
+        if not published:
+            print(f"Пропущена публикация без даты: {title}")
+            continue
+
         url = clean_url(link)
 
-        # Один источник + одна ссылка = одна публикация.
         unique_id = feed["name"] + "|" + url
 
         entries.append({
             "title": title.strip(),
             "url": url,
             "date": published,
-            "sort_date": published or datetime.now(timezone.utc),
             "source": feed["name"],
             "id": unique_id,
             "translate": feed.get("translate", False)
@@ -211,9 +212,7 @@ def translate_title(title):
 
     request = urllib.request.Request(
         f"{api_url}?{params}",
-        headers={
-            "User-Agent": "Mozilla/5.0"
-        }
+        headers={"User-Agent": "Mozilla/5.0"}
     )
 
     for attempt in range(2):
@@ -235,8 +234,6 @@ def translate_title(title):
             if translated:
                 return translated
 
-            print(f"Пустой перевод: {title}")
-
         except Exception as error:
             print(f"Ошибка перевода: {error}")
 
@@ -247,10 +244,7 @@ def translate_title(title):
 
 
 def send_message(item, title):
-    if item["date"]:
-        date_text = item["date"].strftime("%H:%M UTC")
-    else:
-        date_text = "время публикации не указано"
+    date_text = item["date"].strftime("%H:%M UTC")
 
     message = (
         f"{title}\n\n"
@@ -280,6 +274,11 @@ def send_message(item, title):
 
 def main():
     seen = load_state()
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=MAX_AGE_MINUTES)
+    future_limit = now + timedelta(minutes=5)
+
     candidates = []
 
     for feed in FEEDS:
@@ -292,6 +291,14 @@ def main():
             )
 
             for item in entries:
+                # Только свежие публикации.
+                if item["date"] < cutoff:
+                    continue
+
+                # Не отправляем публикации с датой из будущего.
+                if item["date"] > future_limit:
+                    continue
+
                 if item["id"] in seen:
                     continue
 
@@ -304,10 +311,9 @@ def main():
         except Exception as error:
             print(f"Ошибка {feed['name']}: {error}")
 
-    # Отправляем публикации в хронологическом порядке.
-    candidates.sort(
-        key=lambda item: item["sort_date"]
-    )
+    # Сначала отправляем самые старые из свежих,
+    # чтобы сохранить хронологический порядок.
+    candidates.sort(key=lambda item: item["date"])
 
     sent = 0
 
@@ -315,7 +321,6 @@ def main():
         try:
             title = item["title"]
 
-            # Переводим только зарубежные источники.
             if item["translate"]:
                 translated = translate_title(title)
 
@@ -330,7 +335,7 @@ def main():
 
             send_message(item, title)
 
-            # Отмечаем публикацию только после отправки.
+            # Запоминаем только успешно отправленные публикации.
             seen.add(item["id"])
             sent += 1
 
@@ -342,14 +347,13 @@ def main():
 
         except Exception as error:
             print(
-                f"Ошибка отправки "
-                f"[{item['source']}]: {error}"
+                f"Ошибка отправки [{item['source']}]: {error}"
             )
 
     save_state(seen)
 
     print(f"Всего отправлено: {sent}")
-    print(f"Всего новых публикаций найдено: {len(candidates)}")
+    print(f"Найдено свежих публикаций: {len(candidates)}")
 
 
 if __name__ == "__main__":
