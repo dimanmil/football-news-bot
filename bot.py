@@ -7,19 +7,14 @@ import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
 
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from difflib import SequenceMatcher
 
 
 TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 
 STATE_FILE = "seen.json"
-
-# Берём только свежие публикации.
-MAX_AGE_MINUTES = 45
-MAX_MESSAGES_PER_RUN = 20
 
 FEEDS = [
     {
@@ -56,25 +51,6 @@ FEEDS = [
     },
 ]
 
-# Исключаем материалы, которые не нужны в новостной ленте.
-EXCLUDE = [
-    "прогноз", "ставка", "ставки", "коэффициент",
-    "превью", "анонс матча", "где смотреть",
-    "прямая трансляция", "текстовая трансляция",
-    "обзор матча", "фоторепортаж", "подкаст",
-    "колонка", "мнение", "разбор", "аналитика",
-    "рейтинги", "топ-10", "топ 10",
-    "вероятный состав", "составы на матч",
-    "прогноз на матч", "ставка на матч",
-]
-
-STOP_WORDS = {
-    "и", "в", "на", "по", "из", "за", "с", "о", "об",
-    "а", "но", "для", "что", "как", "это", "его", "ее",
-    "the", "a", "an", "of", "to", "in", "on", "for",
-    "de", "la", "el", "y", "en", "der", "die", "das",
-}
-
 
 def local_name(tag):
     return tag.split("}")[-1].lower()
@@ -83,7 +59,7 @@ def local_name(tag):
 def get_child_text(element, names):
     for child in element:
         if local_name(child.tag) in names:
-            if child.text:
+            if child.text and child.text.strip():
                 return child.text.strip()
 
             href = child.attrib.get("href")
@@ -138,81 +114,23 @@ def clean_url(url):
         return url
 
 
-def normalize_title(title):
-    title = title.lower()
-    title = re.sub(r"https?://\S+", "", title)
-    title = re.sub(r"[^\w\s]", " ", title)
-    title = re.sub(r"\s+", " ", title).strip()
-    return title
-
-
-def title_tokens(title):
-    return {
-        word for word in normalize_title(title).split()
-        if len(word) > 2 and word not in STOP_WORDS
-    }
-
-
-def is_duplicate(title, previous_titles):
-    current = normalize_title(title)
-
-    for old in previous_titles:
-        old_normalized = normalize_title(old)
-
-        if current == old_normalized:
-            return True
-
-        if SequenceMatcher(
-            None, current, old_normalized
-        ).ratio() >= 0.88:
-            return True
-
-        a = title_tokens(title)
-        b = title_tokens(old)
-
-        if a and b:
-            overlap = len(a & b) / len(a | b)
-            if overlap >= 0.78:
-                return True
-
-    return False
-
-
-def is_relevant(title):
-    lowered = title.lower()
-
-    if any(word in lowered for word in EXCLUDE):
-        return False
-
-    # Не отправляем совсем короткие или пустые заголовки.
-    if len(title.strip()) < 15:
-        return False
-
-    return True
-
-
 def load_state():
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as file:
             data = json.load(file)
 
-        # Поддерживаем старый формат seen.json.
         if isinstance(data, list):
-            return set(data), []
+            return set(data)
 
-        return (
-            set(data.get("urls", [])),
-            data.get("titles", [])
-        )
+        return set(data.get("urls", []))
 
     except (FileNotFoundError, json.JSONDecodeError):
-        return set(), []
+        return set()
 
 
-def save_state(urls, titles):
+def save_state(seen):
     data = {
-        "urls": list(urls)[-8000:],
-        "titles": titles[-1000:]
+        "urls": list(seen)[-20000:]
     }
 
     with open(STATE_FILE, "w", encoding="utf-8") as file:
@@ -225,7 +143,7 @@ def read_feed(feed):
         headers={"User-Agent": "Mozilla/5.0 FootballNewsBot"}
     )
 
-    with urllib.request.urlopen(request, timeout=25) as response:
+    with urllib.request.urlopen(request, timeout=30) as response:
         root = ET.fromstring(response.read())
 
     entries = []
@@ -235,7 +153,12 @@ def read_feed(feed):
             continue
 
         title = get_child_text(element, {"title"})
-        link = get_child_text(element, {"link", "guid"})
+
+        link = get_child_text(element, {"link"})
+
+        if not link:
+            link = get_child_text(element, {"guid"})
+
         date_text = get_child_text(
             element,
             {"pubdate", "published", "updated", "date"}
@@ -243,21 +166,32 @@ def read_feed(feed):
 
         published = parse_date(date_text)
 
-        if title and link and published:
-            entries.append({
-                "title": title,
-                "url": clean_url(link),
-                "date": published,
-                "source": feed["name"]
-            })
+        if not title or not link:
+            continue
+
+        url = clean_url(link)
+
+        # Разные издания могут публиковать одну новость.
+        # Каждая публикация учитывается отдельно.
+        unique_id = feed["name"] + "|" + url
+
+        entries.append({
+            "title": title.strip(),
+            "url": url,
+            "date": published,
+            "sort_date": published or datetime.now(timezone.utc),
+            "source": feed["name"],
+            "id": unique_id
+        })
 
     return entries
 
 
 def send_message(item):
-    date_text = item["date"].astimezone(
-        timezone.utc
-    ).strftime("%H:%M UTC")
+    if item["date"]:
+        date_text = item["date"].strftime("%H:%M UTC")
+    else:
+        date_text = "время публикации не указано"
 
     message = (
         f"{item['title']}\n\n"
@@ -276,7 +210,7 @@ def send_message(item):
 
     request = urllib.request.Request(url, data=data)
 
-    with urllib.request.urlopen(request, timeout=20) as response:
+    with urllib.request.urlopen(request, timeout=30) as response:
         result = json.loads(response.read().decode("utf-8"))
 
     if not result.get("ok"):
@@ -284,10 +218,7 @@ def send_message(item):
 
 
 def main():
-    seen_urls, seen_titles = load_state()
-
-    now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(minutes=MAX_AGE_MINUTES)
+    seen = load_state()
 
     candidates = []
 
@@ -301,16 +232,12 @@ def main():
             )
 
             for item in entries:
-                if item["date"] < cutoff:
+                if item["id"] in seen:
                     continue
 
-                if item["date"] > now + timedelta(minutes=5):
-                    continue
-
-                if item["url"] in seen_urls:
-                    continue
-
-                if not is_relevant(item["title"]):
+                # Совместимость со старым seen.json:
+                # ранее ссылки сохранялись без названия источника.
+                if item["url"] in seen:
                     continue
 
                 candidates.append(item)
@@ -318,39 +245,39 @@ def main():
         except Exception as error:
             print(f"Ошибка {feed['name']}: {error}")
 
-    # Сначала отправляем самые свежие новости.
+    # Сначала отправляем самые старые из ещё не отправленных,
+    # чтобы при задержке не нарушать хронологию.
     candidates.sort(
-        key=lambda item: item["date"],
-        reverse=True
+        key=lambda item: item["sort_date"]
     )
 
     sent = 0
 
     for item in candidates:
-        if sent >= MAX_MESSAGES_PER_RUN:
-            break
-
-        if is_duplicate(item["title"], seen_titles):
-            seen_urls.add(item["url"])
-            continue
-
         try:
             send_message(item)
 
-            seen_urls.add(item["url"])
-            seen_titles.append(item["title"])
-
+            seen.add(item["id"])
             sent += 1
-            print(f"Отправлено: {item['title']}")
 
+            print(
+                f"Отправлено [{item['source']}]: "
+                f"{item['title']}"
+            )
+
+            # Небольшая пауза между сообщениями.
             time.sleep(1)
 
         except Exception as error:
-            print(f"Ошибка отправки: {error}")
+            print(
+                f"Ошибка отправки "
+                f"[{item['source']}]: {error}"
+            )
 
-    save_state(seen_urls, seen_titles)
+    save_state(seen)
 
     print(f"Всего отправлено: {sent}")
+    print(f"Всего новых публикаций найдено: {len(candidates)}")
 
 
 if __name__ == "__main__":
