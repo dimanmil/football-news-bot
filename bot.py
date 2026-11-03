@@ -14,12 +14,10 @@ TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 
 STATE_FILE = "seen.json"
-
-# Отправляем только публикации за последние 90 минут.
 MAX_AGE_MINUTES = 90
 
-# Список RSS-источников.
 FEEDS = [
+    # Россия
     {
         "name": "Чемпионат",
         "url": "https://www.championat.com/rss/news/football/",
@@ -35,9 +33,11 @@ FEEDS = [
         "url": "https://www.sports.ru/rss/rubric.xml?s=208",
         "translate": False,
     },
+
+    # Испания
     {
-        "name": "Gazzetta",
-        "url": "https://www.gazzetta.it/dynamic-feed/rss/section/Calcio.xml",
+        "name": "Marca",
+        "url": "https://e00-us-marca.uecdn.es/rss/soccer.xml",
         "translate": True,
     },
     {
@@ -50,14 +50,72 @@ FEEDS = [
         "url": "https://www.mundodeportivo.com/feed/rss/futbol",
         "translate": True,
     },
+
+    # Италия
+    {
+        "name": "Gazzetta",
+        "url": "https://www.gazzetta.it/dynamic-feed/rss/section/Calcio.xml",
+        "translate": True,
+    },
+    {
+        "name": "Corriere dello Sport",
+        "url": "http://www.corrieredellosport.it/rss/calcio",
+        "translate": True,
+    },
+    {
+        "name": "Tuttosport",
+        "url": "https://www.tuttosport.com/rss/calcio",
+        "translate": True,
+    },
+
+    # Германия
     {
         "name": "kicker",
         "url": "https://newsfeed.kicker.de/news/fussball",
         "translate": True,
     },
     {
+        "name": "Sport Bild",
+        "url": "http://sportbild.bild.de/rss/vw-fussball/vw-fussball-45036878,sort=1,view=rss2.sport.xml",
+        "translate": True,
+    },
+
+    # Франция
+    {
         "name": "RMC Sport",
         "url": "https://rmcsport.bfmtv.com/rss/football/",
+        "translate": True,
+    },
+    {
+        "name": "Foot Mercato",
+        "url": "https://www.footmercato.net/flux-rss",
+        "translate": True,
+    },
+    {
+        "name": "So Foot",
+        "url": "https://www.sofoot.com/rss",
+        "translate": True,
+    },
+
+    # Англоязычные источники
+    {
+        "name": "BBC Football",
+        "url": "https://feeds.bbci.co.uk/sport/football/rss.xml",
+        "translate": True,
+    },
+    {
+        "name": "ESPN Soccer",
+        "url": "https://www.espn.com/espn/rss/soccer/news",
+        "translate": True,
+    },
+    {
+        "name": "Sky Sports Football",
+        "url": "https://www.skysports.com/rss/11095",
+        "translate": True,
+    },
+    {
+        "name": "The Guardian Football",
+        "url": "https://www.theguardian.com/football/rss",
         "translate": True,
     },
 ]
@@ -184,7 +242,6 @@ def read_feed(feed):
             continue
 
         url = clean_url(link)
-
         unique_id = feed["name"] + "|" + url
 
         entries.append({
@@ -291,18 +348,15 @@ def main():
             )
 
             for item in entries:
-                # Только свежие публикации.
                 if item["date"] < cutoff:
                     continue
 
-                # Не отправляем публикации с датой из будущего.
                 if item["date"] > future_limit:
                     continue
 
                 if item["id"] in seen:
                     continue
 
-                # Совместимость со старым seen.json.
                 if item["url"] in seen:
                     continue
 
@@ -311,8 +365,6 @@ def main():
         except Exception as error:
             print(f"Ошибка {feed['name']}: {error}")
 
-    # Сначала отправляем самые старые из свежих,
-    # чтобы сохранить хронологический порядок.
     candidates.sort(key=lambda item: item["date"])
 
     sent = 0
@@ -335,7 +387,6 @@ def main():
 
             send_message(item, title)
 
-            # Запоминаем только успешно отправленные публикации.
             seen.add(item["id"])
             sent += 1
 
